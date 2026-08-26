@@ -1,0 +1,7 @@
+<launch>
+<node pkg="diagnostics_schema" type="host_alive.py" name="imus_pinging" output="screen">
+    <rosparam command="load" 
+              file="$(find diagnostics_schema)/config/ximu_lower_hostlist.yaml" />
+</node>
+</launch>
+

@@ -1,0 +1,8 @@
+<launch>
+<node pkg="diagnostics_schema" type="pre_setup_diags_node.py" name="pre_setup_node" output="screen">
+    <!-- rosparam command="load" 
+              file="$(find diagnostics_schema)/config/hostlist.yaml" /-->
+</node>
+</launch>
+
+

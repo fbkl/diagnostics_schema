@@ -1,0 +1,12 @@
+waittime: 0.1
+pooling_time: 1.0
+name_prefix: imu
+hostlist:
+  torso: 192.168.1.11
+  pelvis: 192.168.1.12
+  femur_r: 192.168.1.3
+  femur_l: 192.168.1.4
+  tibia_r: 192.168.1.5
+  tibia_l: 192.168.1.6
+  talus_r: 192.168.1.7
+  talus_l: 192.168.1.8

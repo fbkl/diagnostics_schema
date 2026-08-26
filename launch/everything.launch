@@ -1,0 +1,22 @@
+<launch>
+  <node pkg="diagnostic_aggregator" type="aggregator_node"
+        name="diagnostic_aggregator" >
+    <!-- Load the file you made above -->
+    <rosparam command="load" 
+              file="$(find diagnostics_schema)/analyzers.yaml" />
+  </node>
+  <node pkg="diagnostics_schema" type="host_alive.py" name="hosts_pinging" output="screen">
+    <rosparam>
+waittime: 0.5
+pooling_time: 5.0
+name_prefix: hosts
+hostlist:
+  nighthawk: 192.168.1.1
+  samsung_tablet: 192.168.1.101
+  vicon_pc: 192.168.1.103
+  vicon_dongle: 192.168.1.102
+    </rosparam>
+  </node>
+<include file="$(find diagnostics_schema)/launch/ximu_lower_hosts.launch"/>
+</launch>
+

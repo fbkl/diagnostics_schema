@@ -1,0 +1,5 @@
+waittime: 0.1
+pooling_time: 1.0
+hostlist:
+  host1: 192.1.1.1
+  host2: 192.2.2.2

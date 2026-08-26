@@ -1,0 +1,7 @@
+<launch>
+<node pkg="diagnostics_schema" type="host_alive.py" name="hosts_pinging" output="screen">
+    <rosparam command="load" 
+              file="$(find diagnostics_schema)/config/hostlist.yaml" />
+</node>
+</launch>
+
