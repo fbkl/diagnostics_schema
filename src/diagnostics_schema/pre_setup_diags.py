@@ -6,6 +6,7 @@ from abc import abstractmethod
 import subprocess
 import os
 import ipaddress
+import shlex
 import socket
 import struct
 import time
@@ -79,10 +80,23 @@ class CheckRemote(ATest):
         # NOTE: the subprocess timeout must be LONGER than ssh's ConnectTimeout,
         # otherwise a host that is merely slow to answer gets killed by python
         # and reported as a TimeoutExpired instead of the real ssh error.
+        #
+        # shlex.quote is NOT decoration. ssh does not preserve argv boundaries:
+        # it joins everything after the host into one string with spaces and the
+        # REMOTE LOGIN SHELL re-parses it. So ["bash", "-c", "a && b || c"] went
+        # over the wire as
+        #     bash -c a && b || c
+        # and the remote shell handed bash only "a", ran `b` and `c` itself, and
+        # every $(...) inside got expanded in the wrong shell at the wrong time.
+        # A plain command like ["chronyc", "tracking"] survives that unharmed,
+        # which is exactly why it went unnoticed until something had an operator
+        # in it. Quoting each element makes the remote shell hand the script to
+        # bash as a single word, the way the list form implies.
         try:
+            remote = " ".join(shlex.quote(c) for c in self.command)
             self.hostreturn = subprocess.check_output(["ssh","-q", "-o","BatchMode=yes",
                 "-o","ConnectTimeout=3",
-                f"{self.user}@{self.host}", *self.command], timeout=6).decode()
+                f"{self.user}@{self.host}", remote], timeout=6).decode()
         except Exception as e:
             return self.criticality+repr(e)#+self.hostreturn.stderr
         # Subclasses do `err = super().run(); if err: return err` -- returning
@@ -141,12 +155,21 @@ class CheckRemoteRealsense(CheckRemote):
 # Three INDEPENDENT things have to be true before a recording is worth keeping,
 # and the old test checked none of them properly:
 #
-#   1. IS THE TIME REAL?      -> Stratum.
-#      Every backpack node carries `local stratum 10 orphan` so the mesh stays
-#      self-consistent when it is cut off from the world. That is deliberate and
-#      good, but it means an island with no upstream elects a leader and all
-#      three agree on a completely fabricated time. Leap status stays "Normal"
-#      throughout. Stratum >= 10 is the only thing that gives it away.
+#   1. IS THE TIME REAL?      -> Reference ID and Stratum.
+#      2026-08-27: the orphan mesh is GONE. The topology now is a designated
+#      master -- raspberrypi (192.168.1.5) -- carrying `local stratum 5`, with
+#      the two Ubuntu Pis as plain clients of it (`server 192.168.1.5 prefer
+#      minpoll 2 maxpoll 4`, their own pool lines commented out and the campus
+#      servers marked `noselect`, so the master is their ONLY selectable
+#      source). Cut the master off from upstream and it does not stop serving:
+#      `local` kicks in, it hands out its own free-running clock at stratum 5,
+#      and the whole backpack agrees on a fabricated time. Leap status stays
+#      "Normal" throughout. Two different things give it away, and you need
+#      both, because the check runs on both roles:
+#        - ON THE MASTER: Reference ID flips to 7F7F0101, the local-clock refid.
+#        - ON A CLIENT:   Reference ID still says raspberrypi and looks perfect.
+#                         Only the stratum moves, from <= 5 to 6.
+#      Hence LOCAL_FALLBACK_STRATUM below, and hence `>` and not `>=`.
 #
 #   2. IS MY CLOCK THERE YET? -> "System time: X seconds slow of NTP time".
 #      This is NOT the measurement residual. It is the correction chrony still
@@ -162,9 +185,18 @@ class CheckRemoteRealsense(CheckRemote):
 #      Neither 1 nor 2 compares two machines. They are both self-reports.
 # ---------------------------------------------------------------------------
 
-# Must match `local stratum N orphan` in /etc/chrony/conf.d/backpack.conf on
-# every node. If you change it there, change it here.
-ORPHAN_STRATUM = 10
+# Must match `local stratum N` in /etc/chrony/conf.d/*.conf on raspberrypi, the
+# designated master. If you change it there, change it here.
+#
+# A client sits at master+1, so healthy is <= LOCAL_FALLBACK_STRATUM and fallen
+# back is LOCAL_FALLBACK_STRATUM + 1. That margin is exactly one stratum: the
+# master's real upstreams are at 2-3 today (so the master is 3-4 and the clients
+# are 4-5). If an upstream at stratum 4 ever won selection, healthy clients would
+# land on 6 and this check would cry wolf. Raising `local stratum` on raspberrypi
+# to 8 costs nothing -- `local` only activates while the master is unsynchronised,
+# so the number never affects source selection -- and buys the margin back.
+# Change both places together.
+LOCAL_FALLBACK_STRATUM = 5
 
 # At 400 Hz one IMU sample is 2.5 ms. 5 ms is "two samples out, stop and look";
 # 50 ms is "the AR marker and the limb it is stuck to are in different frames
@@ -201,7 +233,7 @@ def chrony_summary(text):
 
 def evaluate_chrony_tracking(text, warn_offset=WARN_OFFSET_S,
                              fail_offset=FAIL_OFFSET_S,
-                             orphan_stratum=ORPHAN_STRATUM):
+                             local_stratum=LOCAL_FALLBACK_STRATUM):
     """Return (fatal, message) describing a problem, or None if the clock is fine.
 
     fatal=True  -> report at the test's own criticality (Critical/Failed)
@@ -223,15 +255,15 @@ def evaluate_chrony_tracking(text, warn_offset=WARN_OFFSET_S,
     # 127.127.x.x is the classic local-clock reference id. A node serving its own
     # undisciplined clock reports this, usually at a flatteringly low stratum.
     if refid.upper().startswith("7F7F"):
-        return (True, f"this host is its OWN time reference (refid {refid}). It is handing out an undisciplined clock as if it were authoritative. Look for a `local stratum 1` line, and check whether its upstream server actually resolves.")
+        return (True, f"this host is its OWN time reference (refid {refid}): it has fallen back to its `local stratum` line and is handing out a free-running clock as if it were authoritative. On raspberrypi that means the master lost every upstream at once -- check the wifi and `chronyc -n sources` there. On any other machine it means a `local` line is in a config where it does not belong.")
 
     try:
         stratum = int(f.get("Stratum", ""))
     except ValueError:
         return (True, "could not read Stratum out of chronyc tracking.")
 
-    if stratum >= orphan_stratum:
-        return (True, f"stratum {stratum}: this is the orphan mesh talking to itself. Every backpack node will agree with this time and all of it is invented -- nothing upstream is reachable from anywhere in the cluster.")
+    if stratum > local_stratum:
+        return (True, f"stratum {stratum} is deeper than the master's own fallback stratum ({local_stratum}), so we are following raspberrypi while raspberrypi is following nothing: it lost upstream, fell back to `local`, and is serving its own free-running clock. Reference ID here still names the master and looks perfectly healthy. Every node in the backpack will agree with this time and all of it is invented.")
 
     raw = f.get("System time", "")
     try:
@@ -251,20 +283,33 @@ def evaluate_chrony_tracking(text, warn_offset=WARN_OFFSET_S,
 CLOCK_TROUBLESHOOTING = [
     "Fix it now, with ROS DOWN (a step mid-run corrupts every timestamp in the recording):\n\tssh <host> sudo chronyc makestep",
     "See who the host is really listening to:\n\tssh <host> chronyc sources -v\n\tssh <host> chronyc tracking",
-    "If it keeps coming back, the stock 'makestep 1 3' is the cause. The orphan mesh answers in ~4 s (minpoll 2) while upstream needs a minute, so the whole step budget is spent on ISLAND time before real time ever shows up -- and after that chrony can only slew. Put this in /etc/chrony/conf.d/backpack-step.conf on every node:\n\tmakestep 1 -1\n\tmaxchange 100 10 3",
-    "Stratum >= 10 means nobody in the cluster has upstream. Check wifi. Note the Ubuntu nodes have every 'pool' line commented out in /etc/chrony/chrony.conf, so the campus servers are their ONLY upstream -- add 'pool 2.debian.pool.ntp.org iburst' to /etc/chrony/sources.d/upstream.sources so they have a path that does not depend on being on the campus network.",
+    "If it keeps coming back, the stock 'makestep 1 3' is the cause. The clients poll the master at minpoll 2, so raspberrypi answers in ~4 s while its own upstream needs a minute: the whole three-step budget is spent agreeing with the master's not-yet-corrected time before real time ever shows up, and after that chrony can only slew. Every node should already carry 'makestep 1 -1'; if you find one that does not, put this in /etc/chrony/conf.d/backpack-step.conf there:\n\tmakestep 1 -1\n\tmaxchange 100 10 3",
+    "A client above stratum 5 means raspberrypi is the one that is orphaned, not the client. Go look at the master, not at the machine that reported this:\n\tssh raspberrypi chronyc -n sources\nDo NOT 'fix' a client by giving it its own upstream: the Ubuntu nodes are deliberately single-master (pool lines commented out, campus servers 'noselect'), and handing one its own source puts two independent time bases inside one recording.",
     "The actual fix is hardware: a coin cell on the RPi5 RTC header (J5). Then the Pis never boot on fake-hwclock time and never lock onto a bogus reference in the first place.",
 ]
+
+# Returned instead of a verdict when the client binary is missing. Nothing was
+# opened and nothing was measured -- worth saying out loud, because the bare
+# FileNotFoundError this replaces read like a missing data file.
+NO_CHRONYC = (
+    "could not run the check: there is no `chronyc` binary in this container, so "
+    "NOTHING WAS MEASURED. This is not a statement about the clock. The container "
+    "runs --network host and shares the host kernel clock, so a chronyc in here "
+    "would reach the host's chronyd on 127.0.0.1:323 and report the host's clock, "
+    "which is exactly the thing we want to check. Add `chrony` to the apt list in "
+    "ros.Dockerfile and rebuild. Until then this machine's own clock is only "
+    "covered indirectly, by the NtpOffsetToHost comparisons."
+)
 
 
 class CheckRemoteChrony(CheckRemote):
     def __init__(self, username, hostname,
                  warn_offset=WARN_OFFSET_S, fail_offset=FAIL_OFFSET_S,
-                 orphan_stratum=ORPHAN_STRATUM, **kwargs):
+                 local_stratum=LOCAL_FALLBACK_STRATUM, **kwargs):
         super().__init__(username, hostname, ["chronyc", "tracking"], **kwargs)
         self.warn_offset = warn_offset
         self.fail_offset = fail_offset
-        self.orphan_stratum = orphan_stratum
+        self.local_stratum = local_stratum
         self.summary = ""
 
     def run(self):
@@ -274,7 +319,7 @@ class CheckRemoteChrony(CheckRemote):
                 return err
             self.summary = chrony_summary(self.hostreturn)
             verdict = evaluate_chrony_tracking(self.hostreturn, self.warn_offset,
-                                               self.fail_offset, self.orphan_stratum)
+                                               self.fail_offset, self.local_stratum)
             if verdict is None:
                 return 'OK'
             fatal, msg = verdict
@@ -301,11 +346,11 @@ class CheckLocalChrony(ATest):
     """
 
     def __init__(self, warn_offset=WARN_OFFSET_S, fail_offset=FAIL_OFFSET_S,
-                 orphan_stratum=ORPHAN_STRATUM, **kwargs):
+                 local_stratum=LOCAL_FALLBACK_STRATUM, **kwargs):
         super().__init__(**kwargs)
         self.warn_offset = warn_offset
         self.fail_offset = fail_offset
-        self.orphan_stratum = orphan_stratum
+        self.local_stratum = local_stratum
         self.host = socket.gethostname()
         self.summary = ""
 
@@ -313,12 +358,19 @@ class CheckLocalChrony(ATest):
         try:
             self.hostreturn = subprocess.check_output(["chronyc", "tracking"],
                                                       timeout=6).decode()
+        except FileNotFoundError:
+            # Deliberately NOT self.criticality. This test is registered as
+            # CRITICAL and do() exits(1) on critical, so reporting a missing
+            # client binary at the test's own criticality kills the whole
+            # pre-flight over a packaging detail instead of over a clock.
+            self.summary = "chronyc is not installed in this container"
+            return OPTIONAL_REQUIREMENT + NO_CHRONYC
         except Exception as e:
             return self.criticality + repr(e)
         try:
             self.summary = chrony_summary(self.hostreturn)
             verdict = evaluate_chrony_tracking(self.hostreturn, self.warn_offset,
-                                               self.fail_offset, self.orphan_stratum)
+                                               self.fail_offset, self.local_stratum)
             if verdict is None:
                 return 'OK'
             fatal, msg = verdict
@@ -329,6 +381,7 @@ class CheckLocalChrony(ATest):
     def troubleshootingmsg(self):
         return ["Is chronyd running here?\n\tsystemctl status chrony",
                 "Careful inside a container: it shares the HOST kernel clock, so this reports the host's clock, not something the container owns.",
+                "'chronyc: command not found' is a missing package, not a missing file and not a broken clock:\n\tapt install chrony   (or add it to the apt list in ros.Dockerfile and rebuild)",
                 *CLOCK_TROUBLESHOOTING]
 
     def testname(self):
@@ -350,11 +403,13 @@ class NtpOffsetToHost(ATest):
     is sub-millisecond. ssh round-trip latency is 10-100x the quantity we are
     trying to measure, so `ssh date` cannot see anything smaller than itself.
 
-    Read this together with the stratum check, not instead of it: an orphaned
-    mesh agrees with itself beautifully. This says "consistent", not "correct".
+    Read this together with the stratum check, not instead of it: a backpack
+    following a master that has fallen back to `local` agrees with itself
+    beautifully. This says "consistent", not "correct".
     """
 
     NTP_EPOCH = 2208988800  # seconds between 1900-01-01 and 1970-01-01
+    LOCAL_REFID = 0x7F7F0101  # what chronyd puts on the wire while on `local`
 
     def __init__(self, hostname, hostip=None, warn_offset=WARN_OFFSET_S,
                  fail_offset=FAIL_OFFSET_S, samples=3, **kwargs):
@@ -369,9 +424,10 @@ class NtpOffsetToHost(ATest):
         self.offset = None
         self.rtt = None
         self.stratum = None
+        self.refid = None
 
     def _probe(self):
-        """One SNTP exchange. Returns (offset, round_trip_delay, stratum)."""
+        """One SNTP exchange. Returns (offset, round_trip_delay, stratum, refid)."""
         packet = b'\x1b' + 47 * b'\0'          # LI=0 VN=3 Mode=3 (client)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(2)
@@ -390,7 +446,12 @@ class NtpOffsetToHost(ATest):
         offset = ((t2 - t1) + (t3 - t4)) / 2
         delay = (t4 - t1) - (t3 - t2)
         stratum = (u[0] >> 16) & 0xff
-        return offset, delay, stratum
+        # u[3] is the reference identifier, and we need it because stratum alone
+        # can no longer tell us whether the MASTER is inventing time: on `local`
+        # fallback raspberrypi serves LOCAL_FALLBACK_STRATUM, which is the exact
+        # number a perfectly healthy client serves. The refid is unambiguous.
+        refid = u[3]
+        return offset, delay, stratum, refid
 
     def run(self):
         try:
@@ -406,10 +467,14 @@ class NtpOffsetToHost(ATest):
                     best = r
             if best is None:
                 return self.criticality + f"{self.host} did not answer NTP on port 123."
-            self.offset, self.rtt, self.stratum = best
+            self.offset, self.rtt, self.stratum, self.refid = best
 
-            if self.stratum == 0 or self.stratum >= ORPHAN_STRATUM:
-                return self.criticality + f"{self.host} answers NTP but reports stratum {self.stratum}, so it is not serving real time."
+            if self.stratum == 0:
+                return self.criticality + f"{self.host} answers NTP but reports stratum 0, i.e. unsynchronised or a kiss-o'-death. It is not serving real time."
+            if self.refid == self.LOCAL_REFID:
+                return self.criticality + f"{self.host} answers NTP, but its reference id on the wire is 7F7F0101 -- the local-clock refid. It has fallen back to its `local stratum` line and is serving its own free-running clock at a respectable-looking stratum {self.stratum}. Everything downstream of it is following an invention."
+            if self.stratum > LOCAL_FALLBACK_STRATUM:
+                return self.criticality + f"{self.host} answers NTP at stratum {self.stratum}, deeper than the master's own fallback stratum ({LOCAL_FALLBACK_STRATUM}), so it is sitting downstream of a raspberrypi that has itself lost upstream."
             if abs(self.offset) > self.fail_offset:
                 return self.criticality + f"our clock and {self.host}'s are {abs(self.offset) * 1000:.1f} ms apart (limit {self.fail_offset * 1000:.0f} ms). Stamped messages crossing between these two machines will not line up."
             if abs(self.offset) > self.warn_offset:
@@ -432,9 +497,20 @@ class NtpOffsetToHost(ATest):
 
 
 class CheckRemoteMount(CheckRemote):
+    # Three distinguishable outcomes, because "not mounted, or mounted but
+    # empty" sends you to look at the wrong half of the problem half the time.
+    #
+    # The `ls` is the real test, not `mountpoint`. /mnt/osim is an
+    # x-systemd.automount entry, so autofs is mounted there permanently and
+    # `mountpoint -q` answers yes whether or not the NFS underneath it is alive.
+    # Touching the directory is what triggers the automount and proves the
+    # server actually answers, which is the thing we care about.
+    PROBE = ("if ! mountpoint -q {mp}; then echo NOT_A_MOUNTPOINT; "
+             "elif [ -z \"$(ls -A {mp} 2>/dev/null)\" ]; then echo MOUNTED_BUT_EMPTY; "
+             "else echo MOUNTED_AND_POPULATED; fi")
+
     def __init__(self, username, hostname, mountpoint, nfs_source="frkle-Predator-PT515-52:/home/frkle/shared/osim", **kwargs):
-        command = ["bash", "-c",
-            f"mountpoint -q {mountpoint} && [ -n \"$(ls -A {mountpoint} 2>/dev/null)\" ] && echo MOUNTED_AND_POPULATED || echo NOT_OK"]
+        command = ["bash", "-c", self.PROBE.format(mp=mountpoint)]
         super().__init__(username, hostname, command, **kwargs)
         self.mountpoint = mountpoint
         self.nfs_source = nfs_source
@@ -444,9 +520,14 @@ class CheckRemoteMount(CheckRemote):
             err = super().run()
             if err:
                 return err
-            if self.hostreturn and "MOUNTED_AND_POPULATED" in self.hostreturn:
+            out = (self.hostreturn or "").strip()
+            if "MOUNTED_AND_POPULATED" in out:
                 return 'OK'
-            return self.criticality + f"{self.mountpoint} on {self.host} is not mounted, or is mounted but empty!"
+            if "MOUNTED_BUT_EMPTY" in out:
+                return self.criticality + f"{self.mountpoint} on {self.host} IS a mountpoint but reads back empty. The automount trigger is there and the NFS server behind it is not answering, or is exporting an empty directory."
+            if "NOT_A_MOUNTPOINT" in out:
+                return self.criticality + f"nothing is mounted at {self.mountpoint} on {self.host} -- not even the autofs trigger, so the fstab entry is missing or systemd never picked it up."
+            return self.criticality + f"the mount probe on {self.host} answered {out!r}, which is not one of the three things it can say. That is a bug in the probe, not a verdict about {self.mountpoint}."
         except Exception as e:
             return self.criticality+repr(e)#+self.hostreturn.stderr
 

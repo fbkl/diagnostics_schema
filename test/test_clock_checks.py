@@ -13,12 +13,20 @@ field a human instinctively reads -- Leap status, RMS offset, Reference ID --
 looked perfect. The old check passed it. The two cases marked (REGRESSION)
 below are the exact output that got through; if either ever goes back to
 passing, the check has been broken again.
+
+2026-08-27: the cluster moved off the orphan mesh to a designated master
+(raspberrypi, `local stratum 5`), so the stratum threshold moved from
+ORPHAN_STRATUM = 10 to LOCAL_FALLBACK_STRATUM = 5. The two "master on `local`
+fallback" cases below are that change: the first one passed under the old
+threshold, which meant an isolated backpack looked healthy.
 """
 import argparse
 import os
 import socket
 import struct
+import subprocess
 import sys
+import textwrap
 import time
 import types
 
@@ -66,10 +74,25 @@ RMS offset      : 0.000000000 seconds
 Root delay      : 0.000000000 seconds
 Leap status     : Normal
 """),
-    ("orphan island, nothing upstream anywhere", 'fail', """
+    ("orphan island (old topology; must still fail)", 'fail', """
 Reference ID    : C0A80103 (rpi5-ubuntu)
 Stratum         : 11
 System time     : 0.000004000 seconds fast of NTP time
+Leap status     : Normal
+"""),
+    # The two cases the 2026-08-27 move off orphan created. With the old
+    # ORPHAN_STRATUM = 10 threshold the first of these PASSED, which is the
+    # whole reason the constant became LOCAL_FALLBACK_STRATUM = 5.
+    ("master on `local` fallback: client sees stratum 6", 'fail', """
+Reference ID    : C0A80105 (raspberrypi)
+Stratum         : 6
+System time     : 0.000009000 seconds fast of NTP time
+Leap status     : Normal
+"""),
+    ("master on `local` fallback, seen ON the master", 'fail', """
+Reference ID    : 7F7F0101 ()
+Stratum         : 5
+System time     : 0.000000000 seconds fast of NTP time
 Leap status     : Normal
 """),
     ("chronyd up but never synchronised", 'fail', """
@@ -117,6 +140,22 @@ HOSTS = [
 ]
 
 
+def _block(text, indent):
+    """Reproduce a captured blob verbatim, indented, so it is obvious what the
+    check was actually looking at rather than what we think it was."""
+    pad = " " * indent
+    body = text.strip("\n")
+    if not body.strip():
+        return pad + f"{DIM}(empty){OFF}"
+    return "\n".join(pad + DIM + line + OFF for line in body.splitlines())
+
+
+def _para(text, indent):
+    pad = " " * indent
+    return "\n".join(textwrap.wrap(text, width=100,
+                                   initial_indent=pad, subsequent_indent=pad))
+
+
 def offline():
     failures = 0
     width = max(len(n) for n, _, _ in CASES)
@@ -124,40 +163,126 @@ def offline():
         verdict = p.evaluate_chrony_tracking(text)
         got = None if verdict is None else ('fail' if verdict[0] else 'warn')
         ok = (got == expected)
-        failures += not ok
-        mark = f"{GREEN}ok{OFF}" if ok else f"{RED}BROKEN{OFF}"
         shown = {None: 'pass', 'warn': 'warn', 'fail': 'fail'}[got]
-        print(f"  [{mark}] {name:<{width}}  -> {shown}"
-              + ("" if ok else f"   {RED}(expected {expected or 'pass'}){OFF}"))
-        if verdict is not None:
-            print(f"        {DIM}{verdict[1][:150]}{OFF}")
+        if ok:
+            print(f"  [{GREEN}ok{OFF}] {name:<{width}}  -> {shown}")
+            if verdict is not None:
+                print(f"        {DIM}{verdict[1][:150]}{OFF}")
+            continue
+
+        # A failing case has to hand over everything needed to fix it without
+        # reading the source: what was expected, what came out, what the check
+        # was looking at, and what it managed to parse out of it.
+        failures += 1
+        print(f"  [{RED}BROKEN{OFF}] {name}")
+        print(f"        {RED}expected {expected or 'pass'}, got {shown}{OFF}")
+        print(f"        {DIM}thresholds in force: warn > {p.WARN_OFFSET_S}s, "
+              f"fail > {p.FAIL_OFFSET_S}s, stratum > {p.LOCAL_FALLBACK_STRATUM}{OFF}")
+        if verdict is None:
+            print(f"        {DIM}the check returned None, i.e. \"this clock is fine\".{OFF}")
+        else:
+            print(f"        {DIM}the check said:{OFF}")
+            print(_para(verdict[1], 10))
+        print(f"        {DIM}chronyc output it was given:{OFF}")
+        print(_block(text, 10))
+        fields = p.parse_chrony_tracking(text)
+        print(f"        {DIM}fields it managed to parse: "
+              f"{fields if fields else '{} <- nothing; the parser is the problem'}{OFF}")
+        print()
     return failures
+
+
+def _icmp_reachable(ip):
+    return subprocess.run(["ping", "-W", "1", "-c", "1", ip],
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def _source_ip_towards(ip):
+    """Which address we will arrive from. This is the whole ball game for the
+    `allow` lines: the backpack allows 192.168.1.0/24, and a probe that leaves
+    over the 192.168.2 interface gets silently dropped, which looks identical
+    to chronyd being down."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((ip, 123))
+        return s.getsockname()[0]
+    except OSError as e:
+        return f"no route ({e})"
+    finally:
+        s.close()
+
+
+def _explain_ntp_failure(name, ip, t):
+    """Say which of the three distinguishable things went wrong, rather than
+    asserting the same guess every time."""
+    src = _source_ip_towards(ip)
+    print(f"        {DIM}probe: {t.samples} x SNTP to {ip}:123/udp, 2 s timeout each, "
+          f"leaving from {src}{OFF}")
+    if t.offset is not None:
+        print(f"        {DIM}it DID answer: offset {t.offset * 1000:+.3f} ms, "
+              f"rtt {t.rtt * 1000:.1f} ms, stratum {t.stratum}, "
+              f"refid 0x{t.refid:08X}{OFF}")
+        print(f"        {DIM}so this is a clock verdict, not a reachability problem. "
+              f"Compare both ends:\n"
+              f"          ssh {name} chronyc tracking\n"
+              f"          chronyc tracking{OFF}")
+        return
+    if not _icmp_reachable(ip):
+        print(f"        {RED}no ICMP reply either{OFF} {DIM}-- {ip} is down, or there is "
+              f"no route to it from {src}. The NTP result says nothing about its "
+              f"clock; fix reachability first.{OFF}")
+        print(f"        {DIM}  ip route get {ip}\n          ping {ip}{OFF}")
+        return
+    print(f"        {YELLOW}pings but does not answer NTP{OFF} {DIM}-- chronyd there is "
+          f"up-but-refusing, or not running at all. We arrive from {src}, so it needs "
+          f"an `allow` line covering that address:{OFF}")
+    print(f"        {DIM}  ssh {name} systemctl is-active chrony\n"
+          f"          ssh {name} grep -rn allow /etc/chrony/\n"
+          f"          ssh {name} chronyc clients   # do we even show up?{OFF}")
+    print(f"        {DIM}(`allow` is the NTP port. `cmdallow` is a different thing and "
+          f"will not help here.){OFF}")
 
 
 def live():
     failures = 0
     me = socket.gethostname()
-    print(f"  {DIM}probing from {me}{OFF}\n")
+    print(f"  {DIM}probing from {me}, thresholds warn > {p.WARN_OFFSET_S * 1000:.0f} ms, "
+          f"fail > {p.FAIL_OFFSET_S * 1000:.0f} ms{OFF}\n")
     for name, ip in HOSTS:
+        if name == me:
+            print(f"  [{DIM}skip{OFF}] {name} ({ip}) is this machine; "
+                  f"the offset to ourselves is zero by construction")
+            continue
         t = p.NtpOffsetToHost(name, ip, criticality=p.REQUIREMENT)
         r = t.run()
         if r == 'OK':
             print(f"  [{GREEN}ok{OFF}] {t.testname()}")
         elif p.OPTIONAL_REQUIREMENT in r:
-            print(f"  [{YELLOW}warn{OFF}] {t.testname()}\n        {r}")
+            print(f"  [{YELLOW}warn{OFF}] {t.testname()}")
+            print(_para(r, 8))
         else:
             failures += 1
-            print(f"  [{RED}FAIL{OFF}] {name} ({ip})\n        {r}")
-            print(f"        {DIM}pings but no NTP reply => chronyd there is refusing us;"
-                  f" it needs an `allow` line covering our subnet.{OFF}")
-    print()
+            print(f"  [{RED}FAIL{OFF}] {name} ({ip})")
+            print(_para(r, 8))
+            _explain_ntp_failure(name, ip, t)
+        print()
+
     t = p.CheckLocalChrony(criticality=p.REQUIREMENT)
     r = t.run()
     if r == 'OK':
         print(f"  [{GREEN}ok{OFF}] {t.testname()}")
+    elif p.OPTIONAL_REQUIREMENT in r:
+        # e.g. no chronyc in the container. Not a clock verdict; do not count it
+        # as a failure, or the test cries wolf on every un-rebuilt image.
+        print(f"  [{YELLOW}warn{OFF}] {t.testname()}")
+        print(_para(r, 8))
     else:
         failures += 1
-        print(f"  [{RED}FAIL{OFF}] {t.testname()}\n        {r}")
+        print(f"  [{RED}FAIL{OFF}] {t.testname()}")
+        print(_para(r, 8))
+        print(f"        {DIM}raw `chronyc tracking` output it judged:{OFF}")
+        print(_block(t.hostreturn or "", 10))
     return failures
 
 
