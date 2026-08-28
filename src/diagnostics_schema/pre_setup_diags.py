@@ -81,17 +81,13 @@ class CheckRemote(ATest):
         # otherwise a host that is merely slow to answer gets killed by python
         # and reported as a TimeoutExpired instead of the real ssh error.
         #
-        # shlex.quote is NOT decoration. ssh does not preserve argv boundaries:
-        # it joins everything after the host into one string with spaces and the
-        # REMOTE LOGIN SHELL re-parses it. So ["bash", "-c", "a && b || c"] went
-        # over the wire as
+        # shlex.quote is NOT decoration. ssh does not preserve argv boundaries: it
+        # joins everything after the host with spaces and the REMOTE LOGIN SHELL
+        # re-parses it, so ["bash","-c","a && b || c"] arrived as
         #     bash -c a && b || c
-        # and the remote shell handed bash only "a", ran `b` and `c` itself, and
-        # every $(...) inside got expanded in the wrong shell at the wrong time.
-        # A plain command like ["chronyc", "tracking"] survives that unharmed,
-        # which is exactly why it went unnoticed until something had an operator
-        # in it. Quoting each element makes the remote shell hand the script to
-        # bash as a single word, the way the list form implies.
+        # -- bash got only "a", and the remote shell ran the rest itself. Plain
+        # commands like ["chronyc","tracking"] survive unharmed, which is why this
+        # hid until a command had an operator in it.
         try:
             remote = " ".join(shlex.quote(c) for c in self.command)
             self.hostreturn = subprocess.check_output(["ssh","-q", "-o","BatchMode=yes",
@@ -146,61 +142,24 @@ class CheckRemoteRealsense(CheckRemote):
         return msg
 
 # ---------------------------------------------------------------------------
-# Clock checks.
+# Clock checks. Full reasoning in doc/clock_checks.md.
 #
-# 2026-08-26: rpi5-silver-ubuntu spent a night 54641 s (15 h 10 m) behind while
-# `chronyc tracking` reported "Leap status: Normal", an RMS offset of 10 us and
-# a perfectly valid Reference ID -- so the old version of this test passed it.
-#
-# Three INDEPENDENT things have to be true before a recording is worth keeping,
-# and the old test checked none of them properly:
-#
+# Three independent things must hold before a recording is worth keeping:
 #   1. IS THE TIME REAL?      -> Reference ID and Stratum.
-#      2026-08-27: the orphan mesh is GONE. The topology now is a designated
-#      master -- raspberrypi (192.168.1.5) -- carrying `local stratum 5`, with
-#      the two Ubuntu Pis as plain clients of it (`server 192.168.1.5 prefer
-#      minpoll 2 maxpoll 4`, their own pool lines commented out and the campus
-#      servers marked `noselect`, so the master is their ONLY selectable
-#      source). Cut the master off from upstream and it does not stop serving:
-#      `local` kicks in, it hands out its own free-running clock at stratum 5,
-#      and the whole backpack agrees on a fabricated time. Leap status stays
-#      "Normal" throughout. Two different things give it away, and you need
-#      both, because the check runs on both roles:
-#        - ON THE MASTER: Reference ID flips to 7F7F0101, the local-clock refid.
-#        - ON A CLIENT:   Reference ID still says raspberrypi and looks perfect.
-#                         Only the stratum moves, from <= 5 to 6.
-#      Hence LOCAL_FALLBACK_STRATUM below, and hence `>` and not `>=`.
+#   2. IS MY CLOCK THERE YET? -> "System time", the correction still pending.
+#   3. DO WE ACTUALLY AGREE?  -> NtpOffsetToHost. 1 and 2 are self-reports.
 #
-#   2. IS MY CLOCK THERE YET? -> "System time: X seconds slow of NTP time".
-#      This is NOT the measurement residual. It is the correction chrony still
-#      intends to apply. While it is non-zero the clock is both wrong AND
-#      running at the wrong rate, because chrony is slewing it. "Last offset"
-#      and "RMS offset" stay at microseconds the whole time, because chrony
-#      subtracts the pending correction from its own predictions -- so the
-#      fields that look like error indicators are exactly the ones that stay
-#      green. "System time" is the field that would have caught it, and the old
-#      parser extracted it into a local variable and then never looked at it.
-#
-#   3. DO WE ACTUALLY AGREE?  -> NtpOffsetToHost, below.
-#      Neither 1 nor 2 compares two machines. They are both self-reports.
+# Written after rpi5-silver-ubuntu ran 15 h behind for a night with Leap status
+# Normal, a 10 us RMS offset and a valid Reference ID. The old check passed it.
 # ---------------------------------------------------------------------------
 
 # Must match `local stratum N` in /etc/chrony/conf.d/*.conf on raspberrypi, the
-# designated master. If you change it there, change it here.
-#
-# A client sits at master+1, so healthy is <= LOCAL_FALLBACK_STRATUM and fallen
-# back is LOCAL_FALLBACK_STRATUM + 1. That margin is exactly one stratum: the
-# master's real upstreams are at 2-3 today (so the master is 3-4 and the clients
-# are 4-5). If an upstream at stratum 4 ever won selection, healthy clients would
-# land on 6 and this check would cry wolf. Raising `local stratum` on raspberrypi
-# to 8 costs nothing -- `local` only activates while the master is unsynchronised,
-# so the number never affects source selection -- and buys the margin back.
-# Change both places together.
+# designated master. Change both places together. The margin over a healthy
+# client is only one stratum -- see "The margin is one stratum" in doc/clock_checks.md.
 LOCAL_FALLBACK_STRATUM = 5
 
 # At 400 Hz one IMU sample is 2.5 ms. 5 ms is "two samples out, stop and look";
-# 50 ms is "the AR marker and the limb it is stuck to are in different frames
-# of the recording".
+# 50 ms is "the AR marker and the limb are in different frames of the recording".
 WARN_OFFSET_S = 0.005
 FAIL_OFFSET_S = 0.050
 
@@ -252,8 +211,8 @@ def evaluate_chrony_tracking(text, warn_offset=WARN_OFFSET_S,
     if leap != "Normal":
         return (True, f"Leap status is {leap!r}. A leap second is pending, so timestamps across it will not be monotonic. Do not record now.")
 
-    # 127.127.x.x is the classic local-clock reference id. A node serving its own
-    # undisciplined clock reports this, usually at a flatteringly low stratum.
+    # 127.127.x.x is the classic local-clock reference id: a node serving its own
+    # undisciplined clock, usually at a flatteringly low stratum.
     if refid.upper().startswith("7F7F"):
         return (True, f"this host is its OWN time reference (refid {refid}): it has fallen back to its `local stratum` line and is handing out a free-running clock as if it were authoritative. On raspberrypi that means the master lost every upstream at once -- check the wifi and `chronyc -n sources` there. On any other machine it means a `local` line is in a config where it does not belong.")
 
@@ -289,8 +248,7 @@ CLOCK_TROUBLESHOOTING = [
 ]
 
 # Returned instead of a verdict when the client binary is missing. Nothing was
-# opened and nothing was measured -- worth saying out loud, because the bare
-# FileNotFoundError this replaces read like a missing data file.
+# opened and nothing was measured -- worth saying out loud. See doc/clock_checks.md.
 NO_CHRONYC = (
     "could not run the check: there is no `chronyc` binary in this container, so "
     "NOTHING WAS MEASURED. This is not a statement about the clock. The container "
@@ -359,10 +317,8 @@ class CheckLocalChrony(ATest):
             self.hostreturn = subprocess.check_output(["chronyc", "tracking"],
                                                       timeout=6).decode()
         except FileNotFoundError:
-            # Deliberately NOT self.criticality. This test is registered as
-            # CRITICAL and do() exits(1) on critical, so reporting a missing
-            # client binary at the test's own criticality kills the whole
-            # pre-flight over a packaging detail instead of over a clock.
+            # Deliberately NOT self.criticality: do() exits(1) on critical, and a
+            # missing client binary must not kill the pre-flight over packaging.
             self.summary = "chronyc is not installed in this container"
             return OPTIONAL_REQUIREMENT + NO_CHRONYC
         except Exception as e:
@@ -405,7 +361,7 @@ class NtpOffsetToHost(ATest):
 
     Read this together with the stratum check, not instead of it: a backpack
     following a master that has fallen back to `local` agrees with itself
-    beautifully. This says "consistent", not "correct".
+    beautifully. This says "consistent", not "correct". See doc/clock_checks.md.
     """
 
     NTP_EPOCH = 2208988800  # seconds between 1900-01-01 and 1970-01-01
@@ -446,10 +402,9 @@ class NtpOffsetToHost(ATest):
         offset = ((t2 - t1) + (t3 - t4)) / 2
         delay = (t4 - t1) - (t3 - t2)
         stratum = (u[0] >> 16) & 0xff
-        # u[3] is the reference identifier, and we need it because stratum alone
-        # can no longer tell us whether the MASTER is inventing time: on `local`
-        # fallback raspberrypi serves LOCAL_FALLBACK_STRATUM, which is the exact
-        # number a perfectly healthy client serves. The refid is unambiguous.
+        # u[3] is the reference identifier. Stratum alone cannot tell us whether
+        # the MASTER is inventing time -- on `local` fallback it serves exactly
+        # the number a healthy client serves. The refid is unambiguous.
         refid = u[3]
         return offset, delay, stratum, refid
 
@@ -653,18 +608,26 @@ class Video(ATest):
 
 def do(tests):
     fail_bin = []
-    for test in tests:
+    n = len(tests)
+    passed = warned = failed = 0
+    rospy.loginfo(f"{Style.BRIGHT}running {n} pre-flight checks{Style.NORMAL}")
+    for i, test in enumerate(tests, 1):
+        # The [i/n] prefix is here so a slow check (ssh to a host that is off
+        # takes the full ConnectTimeout) is visibly a slow check and not a hang.
+        tag = f"{i}/{n}"
         ret = test.run() 
         if REQUIREMENT in ret:
-            rospy.logerr(f"\t[{Style.BRIGHT}{Style.NORMAL}] {test.testname()}")
+            failed += 1
+            rospy.logerr(f"\t[{Style.BRIGHT}{tag}{Style.NORMAL}] {test.testname()}")
             fail_bin.append(test.testname())
             msg =" ".join(ret.split(REQUIREMENT)[1:]) 
             if msg:
                 rospy.logerr("\t"+msg)
             for sugg in test.troubleshootingmsg():
-                rospy.logwarn(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {sugg}")
+                rospy.logwarn(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {sugg}")
         elif OPTIONAL_REQUIREMENT in ret:
-            rospy.logwarn(f"\t[{Style.BRIGHT}{Style.NORMAL}] {test.testname()}")
+            warned += 1
+            rospy.logwarn(f"\t[{Style.BRIGHT}{tag}{Style.NORMAL}] {test.testname()}")
             fail_bin.append(test.testname())
             # was split(REQUIREMENT), which never matched here, so the whole
             # string including the "Optional: " prefix got printed as an error.
@@ -672,21 +635,34 @@ def do(tests):
             if msg:
                 rospy.logerr("\t"+msg)
             for sugg in test.troubleshootingmsg():
-                rospy.logwarn(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {sugg}")
+                rospy.logwarn(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {sugg}")
         elif CRITICAL_REQUIREMENT in ret:
-            rospy.logfatal(f"\t{Style.BRIGHT}{Style.NORMAL} {test.testname()}")
+            rospy.logfatal(f"\t{Style.BRIGHT}{tag}{Style.NORMAL} {test.testname()}")
             msg =" ".join(ret.split(CRITICAL_REQUIREMENT)[1:]) 
             if msg:
                 rospy.logerr("\t"+msg)
             for sugg in test.troubleshootingmsg():
-                rospy.logwarn(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {sugg}")
+                rospy.logwarn(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {sugg}")
+            # Say where we stopped. Otherwise the last thing on screen is a wall
+            # of troubleshooting text and it is not obvious that the checks after
+            # this one never ran at all.
+            rospy.logfatal(f"{Style.BRIGHT}ABORTED at check {i} of {n} "
+                           f"-- checks {i + 1}-{n} did NOT run.{Style.NORMAL}")
             exit(1)
         else:
-            rospy.loginfo(f"\t[{Style.BRIGHT}{Fore.GREEN}{Fore.WHITE}{Style.NORMAL}] "+test.testname())
+            passed += 1
+            rospy.loginfo(f"\t[{Style.BRIGHT}{Fore.GREEN}{tag}{Fore.WHITE}{Style.NORMAL}] "+test.testname())
             if len(test.tips)>0:
                 for tip in test.tips:
-                    rospy.loginfo(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {tip}")
+                    rospy.loginfo(f"\t\t[{Style.BRIGHT}{Style.NORMAL}] {tip}")
     if len(fail_bin) > 0:
         rospy.logwarn("You have some warnings you may want to solve before testing, but system is usable.")
+
+    # The whole point of this block: the node does not exit, it sits in spin(),
+    # so without an explicit end-of-run line there is no way to tell "finished,
+    # everything is fine" apart from "still working on something".
+    verdict = "all clear" if not fail_bin else f"{warned} warning(s), {failed} failure(s)"
+    rospy.loginfo(f"{Style.BRIGHT}=== all {n} checks done: {passed} ok, {verdict} ==={Style.NORMAL}")
+    rospy.loginfo("nothing further will be printed; this node is now idle. Ctrl-C to close it.")
 
     rospy.spin()

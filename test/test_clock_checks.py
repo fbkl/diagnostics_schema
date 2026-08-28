@@ -14,11 +14,11 @@ looked perfect. The old check passed it. The two cases marked (REGRESSION)
 below are the exact output that got through; if either ever goes back to
 passing, the check has been broken again.
 
-2026-08-27: the cluster moved off the orphan mesh to a designated master
-(raspberrypi, `local stratum 5`), so the stratum threshold moved from
-ORPHAN_STRATUM = 10 to LOCAL_FALLBACK_STRATUM = 5. The two "master on `local`
-fallback" cases below are that change: the first one passed under the old
-threshold, which meant an isolated backpack looked healthy.
+2026-08-27: the cluster moved off the orphan mesh to a designated master, so the
+stratum threshold moved from ORPHAN_STRATUM = 10 to LOCAL_FALLBACK_STRATUM = 5.
+The two "master on `local` fallback" cases below are that change.
+
+Why any of this is checked the way it is: ../doc/clock_checks.md
 """
 import argparse
 import os
