@@ -666,6 +666,5 @@ def do(tests):
     # everything is fine" apart from "still working on something".
     verdict = "all clear" if not fail_bin else f"{warned} warning(s), {failed} failure(s)"
     rospy.loginfo(f"{Style.BRIGHT}=== all {n} checks done: {passed} ok, {verdict} ==={Style.NORMAL}")
-    rospy.loginfo("nothing further will be printed; this node is now idle. Ctrl-C to close it.")
 
     rospy.spin()
