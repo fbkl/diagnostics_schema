@@ -1,0 +1,20 @@
+#!/bin/sh
+# clock-release -- allow the clock to step again. The inverse of clock-hold.
+#
+#   chronyc makestep 1 -1   threshold 1 s, limit -1 -> step whenever needed, forever
+#
+# `1 -1` is NOT "stepping off". -1 is the LIMIT argument and means "no limit on
+# how many clock updates may step". The stock `makestep 1 3` is what caused the
+# original 15-hour slew: the 3-step budget got spent on wrong time at boot, and
+# after that chrony could only slew. See doc/clock_checks.md.
+
+set -eu
+
+if ! chronyc tracking >/dev/null 2>&1; then
+    echo "clock-release: chronyd is not answering." >&2
+    exit 1
+fi
+
+chronyc makestep 1 -1 >/dev/null
+echo "clock-release: stepping re-enabled (threshold 1 s, no update limit)."
+chronyc tracking | grep -E "^(Reference ID|Stratum|System time|Leap status)"

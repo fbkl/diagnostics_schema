@@ -1,0 +1,18 @@
+# Let the recording operator freeze and release clock stepping around a take,
+# and nothing else. Every other chronyc subcommand stays privileged.
+#
+# The trailing "" matters: in sudoers, a command listed with no argument spec
+# may be run with ANY arguments. "" means "no arguments at all". Without it,
+# `sudo clock-hold --something` would be permitted, and any future argument
+# handling in the script becomes a privilege boundary.
+#
+# INSTALL (as root, on each recording node):
+#     install -o root -g root -m 0755 clock-hold    /usr/local/sbin/clock-hold
+#     install -o root -g root -m 0755 clock-release /usr/local/sbin/clock-release
+#     install -o root -g root -m 0440 50-clock-hold.sudoers /etc/sudoers.d/50-clock-hold
+#     visudo -c
+#
+# The scripts MUST be root-owned and not writable by the operator. A NOPASSWD
+# entry pointing at a file that user can edit is a root shell with extra steps.
+
+frederico ALL=(root) NOPASSWD: /usr/local/sbin/clock-hold "", /usr/local/sbin/clock-hold -f, /usr/local/sbin/clock-release ""

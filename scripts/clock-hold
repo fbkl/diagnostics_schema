@@ -1,0 +1,59 @@
+#!/bin/sh
+# clock-hold -- correct the clock NOW, then forbid any further stepping.
+#
+# Run this immediately before a recording, on every node that records. A step
+# landing mid-take is a discontinuity in every timestamp in that take, so the
+# rule is: step while ROS is down, then hold.
+#
+#   chronyc makestep      step now, once
+#   chronyc makestep 1 0  threshold 1 s, limit 0 updates -> never step again
+#
+# Release it afterwards with clock-release.
+#
+# It REFUSES to hold on a clock that is not actually good, because holding a bad
+# clock just guarantees a whole session of bad timestamps. -f overrides.
+#
+# Installed to /usr/local/sbin, root-owned, and reachable without a password via
+# /etc/sudoers.d/50-clock-hold. It takes no arguments other than -f on purpose:
+# a NOPASSWD script is a root shell for anyone who can change what it does.
+
+set -eu
+
+FAIL_OFFSET=0.050          # keep in step with FAIL_OFFSET_S in pre_setup_diags.py
+FORCE=0
+[ "${1:-}" = "-f" ] && FORCE=1
+
+if ! tracking=$(chronyc tracking 2>&1); then
+    echo "clock-hold: chronyd is not answering. Nothing to hold." >&2
+    echo "$tracking" >&2
+    exit 1
+fi
+
+echo "clock-hold: stepping now..."
+chronyc makestep >/dev/null
+
+sleep 1
+tracking=$(chronyc tracking)
+
+leap=$(echo "$tracking" | awk -F: '/^Leap status/{sub(/^ */,"",$2); print $2}')
+sys=$(echo "$tracking"  | awk -F: '/^System time/{print $2}' | awk '{print $1}')
+stratum=$(echo "$tracking" | awk -F: '/^Stratum/{print $2+0}')
+
+bad=""
+[ "$leap" = "Normal" ] || bad="$bad leap=$leap"
+awk -v s="$sys" -v m="$FAIL_OFFSET" 'BEGIN{exit !(s+0 > m || -(s+0) > m)}' \
+    && bad="$bad pending-correction=${sys}s"
+[ "$stratum" -gt 0 ] 2>/dev/null || bad="$bad stratum=$stratum"
+
+if [ -n "$bad" ] && [ "$FORCE" -eq 0 ]; then
+    echo "clock-hold: REFUSING to hold, the clock is not good:$bad" >&2
+    echo "clock-hold: stepping is left ENABLED. Fix it, or re-run with -f." >&2
+    echo "$tracking" >&2
+    exit 2
+fi
+[ -n "$bad" ] && echo "clock-hold: WARNING, holding anyway (-f):$bad" >&2
+
+chronyc makestep 1 0 >/dev/null
+echo "clock-hold: stepping is now DISABLED. Nothing will jump during the take."
+echo "clock-hold: stratum $stratum, leap $leap, pending correction ${sys}s."
+echo "clock-hold: run clock-release when the session is over."
