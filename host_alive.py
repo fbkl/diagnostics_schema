@@ -14,8 +14,6 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus,  KeyValue
 # is a build change and wants doing deliberately, not as a side effect of this.
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "src", "diagnostics_schema"))
 
 # Reuse the probe from pre_setup_diags rather than growing a second, subtly
 # different one. It speaks SNTP directly, so it needs no ssh -- which is the
