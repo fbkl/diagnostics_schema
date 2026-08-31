@@ -4,17 +4,6 @@ import socket
 import subprocess
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus,  KeyValue
 
-# SHORTCUT, and it should be called one: this package has no setup.py and
-# catkin_python_setup() is commented out in CMakeLists.txt, so nothing in
-# src/diagnostics_schema/ is importable by package name. pre_setup_diags_node.py
-# gets away with `import pre_setup_diags` only because python puts the running
-# script's OWN directory on sys.path and it happens to live in there. This file
-# does not, so it has to say where to look. test/test_clock_checks.py already
-# does the same thing. The real fix is a setup.py + catkin_python_setup(), which
-# is a build change and wants doing deliberately, not as a side effect of this.
-import os
-import sys
-
 # Reuse the probe from pre_setup_diags rather than growing a second, subtly
 # different one. It speaks SNTP directly, so it needs no ssh -- which is the
 # whole reason it works against the visualiser. See doc/clock_checks.md.
