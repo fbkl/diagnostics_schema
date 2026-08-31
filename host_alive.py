@@ -18,7 +18,7 @@ import sys
 # Reuse the probe from pre_setup_diags rather than growing a second, subtly
 # different one. It speaks SNTP directly, so it needs no ssh -- which is the
 # whole reason it works against the visualiser. See doc/clock_checks.md.
-from pre_setup_diags import (NtpOffsetToHost, WARN_OFFSET_S, FAIL_OFFSET_S,
+from diagnostics_schema.pre_setup_diags import (NtpOffsetToHost, WARN_OFFSET_S, FAIL_OFFSET_S,
                              LOCAL_FALLBACK_STRATUM)
 
 rospy.init_node("host_alive", anonymous=True)
