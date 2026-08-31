@@ -11,12 +11,18 @@ waittime: 0.5
 pooling_time: 5.0
 name_prefix: hosts
 hostlist:
-  nighthawk: 192.168.1.1
-  samsung_tablet: 192.168.1.101
+  raspberrypi: 192.168.2.221
   vicon_pc: 192.168.1.103
-  vicon_dongle: 192.168.1.102
+  rpi5-ubuntu: 192.168.1.3
+  rpi5-silver-ubuntu: 192.168.1.4
+  asusRouter: 192.168.2.1
+  frkle-Predator-PT515-52: 192.168.2.39
+clock_hosts:
+  raspberrypi: 192.168.2.221
+  rpi5-ubuntu: 192.168.1.3
+  rpi5-silver-ubuntu: 192.168.1.4
+  frkle-Predator-PT515-52: 192.168.2.39
     </rosparam>
   </node>
-<include file="$(find diagnostics_schema)/launch/ximu_lower_hosts.launch"/>
 </launch>
 
