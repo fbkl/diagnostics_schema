@@ -17,7 +17,9 @@ from colorama import Style
 
 colorama_init()
 
-import cv2
+# cv2 is imported lazily inside Video.run(). It is a heavy import and only that
+# one check needs it, and host_alive.py reuses NtpOffsetToHost from this module
+# without ever touching a camera.
 
 CRITICAL_REQUIREMENT = 'Critical: '
 REQUIREMENT          = 'Failed: '
@@ -589,6 +591,7 @@ class Video(ATest):
     def run(self):
         if not os.path.exists(self.videodev):
             return f"{self.criticality} device does not exist {self.videodev}"
+        import cv2
         cam = cv2.VideoCapture(self.dev)
         try:
             ret, frame = cam.read()

@@ -34,7 +34,13 @@ analyzers:
       'CPU Usage',
       'CPU Temperature',
       'HD Usage',
-      'NFS']
+      'NFS',
+      # host_alive.py publishes "<prefix>/<host> Clock" per opted-in host and
+      # "<prefix>/<host> chronyd" for the machine it runs on. See
+      # doc/clock_checks.md; chronyd going ERROR is what a maxchange abort
+      # looks like from the outside.
+      'Clock',
+      'chronyd']
   power:
     type: diagnostic_aggregator/GenericAnalyzer
     path: 'Power System'
