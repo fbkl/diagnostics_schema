@@ -1,0 +1,10 @@
+# /etc/chrony/sources.d/upstream.sources  --  MASTER ONLY
+#
+# The master is the only node with real upstream. Leaves must NOT have their own
+# (see leaf-upstream.sources).
+
+server frd-gsw.hvl.no  iburst
+server 128.39.103.52   iburst
+
+# /etc/chrony/chrony.conf also carries `pool 2.debian.pool.ntp.org iburst`, so
+# there is a path that does not depend on being on the campus network.

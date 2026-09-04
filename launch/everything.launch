@@ -18,7 +18,7 @@ hostlist:
   asusRouter: 192.168.2.1
   frkle-Predator-PT515-52: 192.168.2.39
 clock_hosts:
-  raspberrypi: 192.168.2.221
+  raspberrypi: 192.168.1.5
   rpi5-ubuntu: 192.168.1.3
   rpi5-silver-ubuntu: 192.168.1.4
   frkle-Predator-PT515-52: 192.168.2.39

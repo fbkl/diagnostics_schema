@@ -1,0 +1,13 @@
+# /etc/chrony/sources.d/upstream.sources  --  LEAF
+#
+# NOSELECT IS DELIBERATE. These are monitored so `chronyc sources` can show how
+# far the rig has drifted from UTC, but they can never be SELECTED, so they
+# cannot steer this clock.
+#
+# Do NOT remove `noselect`, and do NOT add a pool here. A leaf with its own
+# upstream is a second independent time base inside one recording. If it then
+# disagrees with the rest of the rig, the discrepancy shows up as data that looks
+# wrong rather than time that is wrong, and you debug the wrong thing.
+
+server frd-gsw.hvl.no iburst noselect
+server 128.39.103.52  iburst noselect

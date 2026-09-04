@@ -4,11 +4,17 @@ import socket
 import subprocess
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus,  KeyValue
 
-# Reuse the probe from pre_setup_diags rather than growing a second, subtly
-# different one. It speaks SNTP directly, so it needs no ssh -- which is the
-# whole reason it works against the visualiser. See doc/clock_checks.md.
-from diagnostics_schema.pre_setup_diags import (NtpOffsetToHost, WARN_OFFSET_S, FAIL_OFFSET_S,
-                             LOCAL_FALLBACK_STRATUM)
+# The verdict logic lives in pre_setup_diags and is shared with prediags, so the
+# live panel and the pre-flight check can never drift apart on what "bad" means.
+# See doc/clock_checks.md.
+from diagnostics_schema.pre_setup_diags import (parse_chrony_tracking,
+                                                chrony_summary,
+                                                evaluate_chrony_tracking)
+
+# Which tracking fields are worth carrying into the diagnostic. The rest are
+# chrony internals that would just make the panel harder to read.
+CHRONY_KEYS = ("Reference ID", "Stratum", "System time", "Last offset",
+               "RMS offset", "Leap status")
 
 rospy.init_node("host_alive", anonymous=True)
 
@@ -32,32 +38,60 @@ me = socket.gethostname()
 
 
 def clock_status(name, hostname, hostip):
-    """One DiagnosticStatus for one remote clock, via SNTP. No ssh."""
+    """One DiagnosticStatus for one remote clock, asked of that host's own chronyd.
+
+    `chronyc -h` talks to chronyd's command port (UDP 323) directly: no ssh, and
+    no measurement of our own. What comes back is chrony's OWN estimate, filtered
+    over many samples with outlier rejection, which is a different quality of
+    number from the two raw SNTP round trips this used to take. Those two samples
+    were largely measuring wifi packet queueing -- the old probe read +1.06 ms
+    against LOOPBACK, where the answer is zero by construction -- so the panel
+    flapped WARN constantly and was training us to ignore it.
+
+    Note what this is and is not. chronyc tracking is a SELF-REPORT: each host
+    grades itself against its own selected source. In this star topology that is
+    the number we want anyway, because every node except raspberrypi has
+    raspberrypi as its source, so "System time" IS the offset to the master. What
+    is genuinely lost is check #3, an independent two-machine comparison. That
+    still exists as NtpOffsetToHost in prediags, where it runs once, deliberately,
+    before a recording, rather than every cycle over wifi.
+
+    Requires `bindcmdaddress <that host's lan ip>` and a `cmdallow` covering us,
+    on the target. Bind to the LAN address: three of these machines also hold
+    campus addresses.
+    """
     d = DiagnosticStatus()
     d.name = f"{name} Clock"
-    t = NtpOffsetToHost(hostname, hostip, samples=2)
-    ret = t.run()
     d.values.append(KeyValue(key="IP", value=str(hostip)))
-    if t.offset is None:
-        d.level = d.ERROR
-        d.message = f"{hostname} did not answer NTP on port 123."
-        return d
-    d.values.append(KeyValue(key="Offset ms", value=f"{t.offset * 1000:+.3f}"))
-    d.values.append(KeyValue(key="RTT ms", value=f"{t.rtt * 1000:.1f}"))
-    d.values.append(KeyValue(key="Stratum", value=str(t.stratum)))
-    d.values.append(KeyValue(key="Refid", value=f"0x{t.refid:08X}"))
-    if ret == "OK":
-        d.level = d.OK
-        d.message = f"{abs(t.offset) * 1000:.2f} ms from us, stratum {t.stratum}."
-    elif t.refid == t.LOCAL_REFID or t.stratum > LOCAL_FALLBACK_STRATUM or t.stratum == 0:
-        d.level = d.ERROR
-        d.message = f"{hostname} is serving invented time (stratum {t.stratum}, refid 0x{t.refid:08X})."
-    elif abs(t.offset) > FAIL_OFFSET_S:
-        d.level = d.ERROR
-        d.message = f"{abs(t.offset) * 1000:.1f} ms apart (limit {FAIL_OFFSET_S * 1000:.0f} ms). Do not record."
-    else:
+
+    try:
+        text = subprocess.check_output(["chronyc", "-h", str(hostip), "tracking"],
+                                       stderr=subprocess.STDOUT, timeout=6).decode()
+    except FileNotFoundError:
+        # Nothing was measured. Deliberately not ERROR: this says nothing at all
+        # about that host's clock, and reporting it as a clock fault is a lie.
         d.level = d.WARN
-        d.message = f"{abs(t.offset) * 1000:.1f} ms apart (warn over {WARN_OFFSET_S * 1000:.0f} ms)."
+        d.message = "chronyc is not installed here, so nothing was measured."
+        return d
+    except Exception as e:
+        d.level = d.ERROR
+        d.message = (f"could not reach chronyd on {hostname} ({hostip}). It needs "
+                     f"`bindcmdaddress {hostip}` and a `cmdallow` covering us. {e!r}")
+        return d
+
+    fields = parse_chrony_tracking(text)
+    for k in CHRONY_KEYS:
+        if k in fields:
+            d.values.append(KeyValue(key=k, value=fields[k]))
+
+    verdict = evaluate_chrony_tracking(text)
+    if verdict is None:
+        d.level = d.OK
+        d.message = chrony_summary(text)
+        return d
+    fatal, msg = verdict
+    d.level = d.ERROR if fatal else d.WARN
+    d.message = msg
     return d
 
 
@@ -85,12 +119,26 @@ def chronyd_status():
                      "a maxchange abort looks like: the clock is now free-running. "
                      f"({e!r})")
         return d
-    fields = dict(l.split(":", 1) for l in out.splitlines() if ":" in l)
-    for k in ("Reference ID", "Stratum", "System time", "Leap status"):
-        if k.strip() in fields:
-            d.values.append(KeyValue(key=k, value=fields[k].strip()))
-    d.level = d.OK
-    d.message = f"chronyd up, stratum {fields.get('Stratum', '?').strip()}."
+    # This hand-rolled its own parse and got it wrong: splitting on ":" leaves
+    # the padding on the key, so "Stratum         " never matched "Stratum" and
+    # every field silently vanished. parse_chrony_tracking already strips both
+    # sides. Do not grow a second parser for a format we already parse.
+    fields = parse_chrony_tracking(out)
+    for k in CHRONY_KEYS:
+        if k in fields:
+            d.values.append(KeyValue(key=k, value=fields[k]))
+
+    # chronyd being up is the point of this check -- it is the maxchange-abort
+    # detector -- but we have the text in hand, so grade the local clock with the
+    # same rules as every other host rather than reporting a bare "up".
+    verdict = evaluate_chrony_tracking(out)
+    if verdict is None:
+        d.level = d.OK
+        d.message = f"chronyd up, {chrony_summary(out)}"
+        return d
+    fatal, msg = verdict
+    d.level = d.ERROR if fatal else d.WARN
+    d.message = f"chronyd up, but: {msg}"
     return d
 
 if poolingtime <= waittime:

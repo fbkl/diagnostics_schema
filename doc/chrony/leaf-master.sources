@@ -1,0 +1,9 @@
+# /etc/chrony/sources.d/master.sources  --  LEAF
+#
+# The house clock. `prefer` plus a fast poll: common-mode error cancels, so
+# mutual agreement between nodes drops to LAN quality (tens of us) instead of the
+# ~2 ms you get when four nodes each independently chase four different upstream
+# servers. Absolute UTC gets slightly worse, which is the right trade for a
+# measurement rig.
+
+server 192.168.1.5 iburst prefer minpoll 2 maxpoll 4

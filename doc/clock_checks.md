@@ -179,6 +179,13 @@ that chrony can only slew.
 Pis never boot on fake-hwclock time and never lock onto a bogus reference in the
 first place. It is on the TODO list — `first_paperino.md:989`, still open.
 
+## The configs themselves
+
+Working templates for all four nodes, captured from the live hosts, are in
+[chrony/](chrony/) — one per role, plus the four traps that each cost a day
+(silent suffix rules, binding the command port to a wifi address, `allow` vs
+`cmdallow`, and campus addresses).
+
 ## Testing
 
 ```bash

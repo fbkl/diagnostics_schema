@@ -8,24 +8,21 @@ analyzers:
       'Delay',
       'delay'
     ]
-    #    analyzers:
-      ##We should make something for the vio units maybe
-      ## No imus though
-      #      imu:
-      #        type: diagnostic_aggregator/GenericAnalyzer
-      #        path: IMU
-      #        timeout: 5.0
-      #        find_and_remove_prefix: imu
-      #        num_items: 8
-      #        contains: ["Temperature", "Battery Percentage", "Delay"]
-          ## No insoles here either
-          #      insoles:
-          #        type: diagnostic_aggregator/GenericAnalyzer
-          #        path: Insoles
-          #        timeout: 5.0
-          #        find_and_remove_prefix: insole
-          #        num_items: 2
-          #        contains: ['battery','delay']
+    analyzers:
+      imu:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: IMU
+        timeout: 5.0
+        find_and_remove_prefix: imu
+        num_items: 8
+        contains: ["Temperature", "Battery Percentage", "Delay"]
+      insoles:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Insoles
+        timeout: 5.0
+        find_and_remove_prefix: insole
+        num_items: 2
+        contains: ['battery','delay']
   computers:
     type: diagnostic_aggregator/GenericAnalyzer
     path: Computers
