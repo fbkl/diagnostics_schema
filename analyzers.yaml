@@ -26,6 +26,17 @@ analyzers:
           #        find_and_remove_prefix: insole
           #        num_items: 2
           #        contains: ['battery','delay']
+  timed_hosts:
+    type: diagnostic_aggregator/GenericAnalyzer
+    path: Clocks
+    find_and_remove_prefix: clock_hosts
+    contains: [
+      # host_alive.py publishes "<prefix>/<host> Clock" per opted-in host and
+      # "<prefix>/<host> chronyd" for the machine it runs on. See
+      # doc/clock_checks.md; chronyd going ERROR is what a maxchange abort
+      # looks like from the outside.
+      'Clock',
+      'chronyd']
   computers:
     type: diagnostic_aggregator/GenericAnalyzer
     path: Computers
@@ -38,12 +49,7 @@ analyzers:
       'CPU Temperature',
       'HD Usage',
       'NFS',
-      # host_alive.py publishes "<prefix>/<host> Clock" per opted-in host and
-      # "<prefix>/<host> chronyd" for the machine it runs on. See
-      # doc/clock_checks.md; chronyd going ERROR is what a maxchange abort
-      # looks like from the outside.
-      'Clock',
-      'chronyd']
+      ]
   power:
     type: diagnostic_aggregator/GenericAnalyzer
     path: 'Power System'
