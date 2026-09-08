@@ -19,6 +19,11 @@
 
 set -eu
 
+if ! [ $(id -u) = 0 ]; then
+  echo This script must be run as root.
+  exit 100
+fi
+
 FAIL_OFFSET=0.050          # keep in step with FAIL_OFFSET_S in pre_setup_diags.py
 FORCE=0
 [ "${1:-}" = "-f" ] && FORCE=1
