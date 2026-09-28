@@ -50,6 +50,12 @@ analyzers:
       'HD Usage',
       'NFS',
       ]
+  ar_markers:
+    # ar_visibility.py, one per camera: "AR <camera> room marker". WARN means that
+    # camera CANNOT be calibrated right now -- do not keep pressing calibrate.
+    type: diagnostic_aggregator/GenericAnalyzer
+    path: 'AR Markers'
+    contains: ['room marker']
   power:
     type: diagnostic_aggregator/GenericAnalyzer
     path: 'Power System'
